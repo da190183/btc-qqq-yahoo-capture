@@ -16,6 +16,7 @@ concurrency:
 
 env:
   ASSET_NAME: BTC_QQQ_verified_prices_latest.zip
+  RATE_ASSET_NAME: BTC_QQQ_verified_rates_latest.zip
 
 jobs:
   capture:
@@ -32,8 +33,10 @@ jobs:
         run: |
           mkdir -p dist
           python yahoo_capture.py --bundle "dist/$ASSET_NAME"
+          python rate_capture.py --bundle "dist/$RATE_ASSET_NAME"
           cd dist
           sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256"
+          sha256sum "$RATE_ASSET_NAME" > "$RATE_ASSET_NAME.sha256"
       - name: Publish only after every validation gate passes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,4 +47,6 @@ jobs:
           gh release upload live \
             "dist/$ASSET_NAME" \
             "dist/$ASSET_NAME.sha256" \
+            "dist/$RATE_ASSET_NAME" \
+            "dist/$RATE_ASSET_NAME.sha256" \
             --clobber
