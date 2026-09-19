@@ -16,9 +16,12 @@ import json
 import math
 import os
 import tempfile
+import time as clock
 import zipfile
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from urllib.error import URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 UTC = timezone.utc
@@ -27,8 +30,7 @@ ROOT_NAME = "verified_rates"
 H15_IDS = ("DGS2", "DGS10", "DFII10")
 POLICY_IDS = ("DFEDTAR", "DFEDTARL", "DFEDTARU")
 SOURCE_IDS = H15_IDS + POLICY_IDS
-URL = {series_id: f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-       for series_id in SOURCE_IDS}
+BASE_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 START = date(1999, 3, 10)
 RANGE_START = date(2008, 12, 16)
 REAL_START = date(2003, 1, 2)
@@ -55,6 +57,19 @@ POLICY_EVENT_FIELDS = (
     "path_before_at_utc", "path_after_at_utc", "path_available_at_utc", "path_source",
     "path_instrument", "source",
 )
+
+
+def source_url(series_id: str, asof: datetime) -> str:
+    """Request only the declared research window, not an unbounded FRED export."""
+    if series_id not in SOURCE_IDS:
+        raise ValueError(f"Unsupported FRED series: {series_id}")
+    start = REAL_START if series_id == "DFII10" else RANGE_START if series_id in (
+        "DFEDTARL", "DFEDTARU") else START
+    return BASE_URL + "?" + urlencode({
+        "id": series_id,
+        "cosd": start.isoformat(),
+        "coed": asof.astimezone(UTC).date().isoformat(),
+    })
 
 
 def numeric(value: str) -> float:
@@ -189,16 +204,27 @@ def canonical_csv_bytes(rows: list[dict], fieldnames: tuple[str, ...]) -> bytes:
 
 
 def fetch(url: str) -> bytes:
-    request = Request(url, headers={
-        "User-Agent": "BTC-QQQ-public-rate-capture/1.0 (official public data; no orders)"
-    })
-    with urlopen(request, timeout=45) as response:
-        if getattr(response, "status", 200) != 200:
-            raise ValueError(f"FRED returned HTTP {response.status}")
-        body = response.read()
-    if not body:
-        raise ValueError("FRED returned an empty response")
-    return body
+    """Fetch with one bounded retry for transient official-source timeouts."""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        request = Request(url, headers={
+            "User-Agent": "BTC-QQQ-public-rate-capture/1.0 (official public data; no orders)",
+            "Connection": "close",
+        })
+        try:
+            with urlopen(request, timeout=75) as response:
+                if getattr(response, "status", 200) != 200:
+                    raise ValueError(f"FRED returned HTTP {response.status}")
+                body = response.read()
+            if not body:
+                raise ValueError("FRED returned an empty response")
+            return body
+        except (TimeoutError, URLError, OSError) as exc:
+            last_error = exc
+            if attempt == 0:
+                clock.sleep(2)
+    assert last_error is not None
+    raise last_error
 
 
 def capture(out: Path, asof: datetime) -> Path:
@@ -207,14 +233,16 @@ def capture(out: Path, asof: datetime) -> Path:
     parsed: dict[str, list[tuple[date, float]]] = {}
     receipts = []
     for series_id in SOURCE_IDS:
-        raw = fetch(URL[series_id])
+        url = source_url(series_id, asof)
+        print(f"Fetching official FRED series {series_id}...", flush=True)
+        raw = fetch(url)
         digest = hashlib.sha256(raw).hexdigest()
         response_name = f"responses/{digest}.csv"
         (out / response_name).write_bytes(raw)
         parsed[series_id] = parse_fred(raw, series_id)
         receipts.append({
             "series_id": series_id,
-            "url": URL[series_id],
+            "url": url,
             "retrieved_at_utc": datetime.now(UTC).isoformat(),
             "response_sha256": digest,
             "response_file": response_name,
