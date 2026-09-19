@@ -1,0 +1,48 @@
+name: Publish verified Yahoo capture
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 11:30 UTC is before the existing 08:00 America/New_York model task
+    # throughout U.S. daylight- and standard-time periods.
+    - cron: "30 11 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yahoo-price-capture
+  cancel-in-progress: false
+
+env:
+  ASSET_NAME: BTC_QQQ_verified_prices_latest.zip
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install the single calendar dependency
+        run: python -m pip install exchange-calendars==4.13.1
+      - name: Capture, validate, and package all three Yahoo histories once
+        run: |
+          mkdir -p dist
+          python yahoo_capture.py --bundle "dist/$ASSET_NAME"
+          cd dist
+          sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256"
+      - name: Publish only after every validation gate passes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view live >/dev/null 2>&1 || \
+            gh release create live --title "Latest verified Yahoo capture" \
+              --notes "Machine-produced BTC-USD, QQQ, and SPY source capture. No model scores or orders."
+          gh release upload live \
+            "dist/$ASSET_NAME" \
+            "dist/$ASSET_NAME.sha256" \
+            --clobber
